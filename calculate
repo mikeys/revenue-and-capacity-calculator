@@ -1,0 +1,158 @@
+#!/usr/bin/env ruby
+
+require 'csv'
+require 'optparse'
+
+class Calculation
+  CSV_OPTIONS = { headers: true,  converters: ->(f) { f.strip } }
+
+  attr_accessor :unreserved_capacity, :revenue
+
+  class << self
+    def create(file:, date:)
+      calculation = new(file: file, date: date)
+      calculation.execute
+      calculation
+    end
+  end
+
+  def initialize(file:, date:)
+    @file = file
+    @date = date
+  end
+
+  def execute
+    revenue, unreserved_capacity = 0, 0
+
+    CSV.foreach(@file, CSV_OPTIONS) do |line|
+      reservation = reservation_from_csv_line(line)
+
+      revenue += reservation.revenue
+      unreserved_capacity += reservation.unreserved_capacity
+    end
+
+    self.unreserved_capacity = unreserved_capacity
+    self.revenue = revenue.round(2)
+  end
+
+  def reservation_from_csv_line(line)
+    capacity = line[0].to_i
+    monthly_price = line[1].to_i
+    start_day = parse_date(line[2])
+    end_day = line[3] && parse_date(line[3])
+
+    Reservation.new(calc_date: @date, capacity: capacity, monthly_price: monthly_price,
+                    start_day: start_day, end_day: end_day)
+  end
+
+  def parse_date(str)
+    Date.strptime(str, '%Y-%m-%d')
+  end
+
+  def to_s
+    "expected revenue: $#{revenue}, \
+     expected total capacity of the unreserved offices: #{unreserved_capacity}"
+  end
+end
+
+class Reservation
+  attr_reader :calc_date, :capacity, :monthly_price, :start_day, :end_day
+
+  def initialize(calc_date:, capacity:, monthly_price:, start_day:, end_day:)
+    @calc_date = calc_date
+    @capacity = capacity
+    @monthly_price = monthly_price
+    @start_day = start_day
+    @end_day = end_day
+  end
+
+  def revenue
+    ((counted_days_for_revenue / calc_date.days_in_month.to_f) * monthly_price).round(2)
+  end
+
+  def unreserved_capacity
+    counted_days_for_revenue > 0 ? 0 : capacity
+  end
+
+  def counted_days_for_revenue
+    # cache calculation result
+    @counted_days_for_revenue ||= calculate_counted_days_for_revenue
+  end
+
+  def calculate_counted_days_for_revenue
+    # calc_date: 2014-02-01 end_day: 2014-01-30
+    return 0 if end_day && calc_date > end_day
+    # calc_date: 2014-02 start_day: 2014-03-01
+    return 0 if start_day > calc_date && !start_day.same_month_as?(calc_date)
+
+    effective_start_date = [start_day, calc_date].max
+    effective_end_date = if !end_day
+                          calc_date.last_day_in_month
+                        else
+                          [end_day, calc_date.last_day_in_month].min
+                        end
+
+    return effective_end_date.day - effective_start_date.day + 1
+  end
+end
+
+class Date
+  def same_month_as?(other_date)
+    month == other_date.month && year == other_date.year
+  end
+
+  def last_day_in_month
+    Date.new(year, month, -1)
+  end
+
+  def days_in_month
+    last_day_in_month.day
+  end
+end
+
+options = {}
+optparse = OptionParser.new do |opts|
+  opts.banner = "Usage: calculate [options]"
+
+  opts.on("-f", "--file FILE",
+          "CSV file which contains the reservation data. (required)") do |file|
+    options[:file] = file
+  end
+
+  opts.on("-d", "--date DATE",
+          "Date in the format of YYYY-MM. (required)") do |date|
+    options[:date] = date
+  end
+
+  opts.on_tail('-h', '--help', 'Show this message') do
+    puts opts
+    exit
+  end
+end
+
+begin
+  optparse.parse!
+  mandatory = [:file, :date]
+  missing = mandatory.select{ |param| options[param].nil? }
+
+  unless missing.empty?
+    raise OptionParser::MissingArgument, missing.join(', ')
+  end
+
+  file = options[:file]
+  if (!File.exists?(file))
+    raise OptionParser::InvalidArgument, "file #{file} does not exist"
+  end
+
+  date = Date.strptime(options[:date], '%Y-%m') rescue nil
+  if !date
+    raise OptionParser::InvalidArgument,
+      "date in wrong format. should match: YYYY-MM (example 2014-05)"
+  end
+
+  calculation = Calculation.create(file: file, date: date)
+  puts calculation.to_s
+rescue OptionParser::MissingArgument, OptionParser::InvalidArgument => err
+  puts err.message
+  puts "\n#{optparse}"
+end
